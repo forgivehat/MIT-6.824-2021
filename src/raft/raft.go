@@ -42,7 +42,6 @@ import (
 
 // Raft
 // A Go object implementing a single Raft peer.
-//
 type Raft struct {
 	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -88,11 +87,9 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isLeader
 }
 
-//
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
-//
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
@@ -104,9 +101,7 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-//
 // restore previously persisted state.
-//
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -129,7 +124,6 @@ func (rf *Raft) readPersist(data []byte) {
 // CondInstallSnapshot
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
-//
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
@@ -138,7 +132,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 }
 
 // Snapshot
-//the service says it has created a snapshot that has
+// the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
@@ -421,7 +415,7 @@ func (rf *Raft) advanceLeaderCommit() {
 	n := len(rf.matchIndex)
 	tmp := make([]int, n)
 	copy(tmp, rf.matchIndex)
-	sort.Sort(sort.Reverse(sort.IntSlice(tmp)))
+	sort.Ints(tmp)
 	newCommitIndex := tmp[n-(n/2+1)]
 
 	if newCommitIndex > rf.commitIndex {
@@ -494,7 +488,6 @@ func (rf *Raft) reInitLeaderState() {
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
-//
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -521,7 +514,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // up CPU time, perhaps causing later tests to fail and generating
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
-//
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
@@ -533,7 +525,29 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) applier() {
-
+	for !rf.killed() {
+		rf.mu.Lock()
+		for rf.lastApplied >= rf.commitIndex {
+			rf.applyCond.Wait()
+		}
+		lastApplied := rf.lastApplied
+		firstLogIndex := rf.getFirstLog().Index
+		commitIndex := rf.commitIndex
+		applyEntries := make([]Entry, commitIndex-lastApplied)
+		copy(applyEntries, rf.logs[lastApplied-firstLogIndex+1:commitIndex-firstLogIndex+1])
+		rf.mu.Unlock()
+		for _, entry := range applyEntries {
+			applyMsg := ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: entry.Index,
+			}
+			rf.applyCh <- applyMsg
+		}
+		rf.mu.Lock()
+		rf.lastApplied = commitIndex
+		rf.mu.Unlock()
+	}
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -581,7 +595,7 @@ func (rf *Raft) replicator(peer int) {
 func (rf *Raft) needReplicating(peer int) bool {
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
-	return rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index // 这里的peer就是当前节点!
+	return rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
 
 // Make
@@ -594,7 +608,6 @@ func (rf *Raft) needReplicating(peer int) bool {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-//
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
@@ -630,5 +643,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 	return rf
 }
