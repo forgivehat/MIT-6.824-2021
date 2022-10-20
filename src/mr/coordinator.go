@@ -31,7 +31,7 @@ type Coordinator struct {
 }
 
 /*
-	worker请求Job的RPC, 参数中的reply携带Job所需信息
+worker请求Job的RPC, 参数中的reply携带Job所需信息
 */
 func (c *Coordinator) Request(args *HeartbeatArgs, reply *HeartbeatReply) error {
 	c.mu.Lock()
@@ -67,7 +67,7 @@ func (c *Coordinator) selectTask(reply *HeartbeatReply, phase CurrentPhase) {
 			reply.NMap = c.nMap
 			reply.NReduce = c.nReduce
 			reply.JobType = task.jobType
-			// reduce阶段，file直接在worker里根据mr-x-x的格式得到
+			// reduce阶段, file直接在worker里根据mr-x-x的格式得到
 			reply.Filename = task.fileName
 			break
 		} else if task.taskStatus == Processing {
@@ -79,8 +79,8 @@ func (c *Coordinator) selectTask(reply *HeartbeatReply, phase CurrentPhase) {
 				reply.NMap = c.nMap
 				reply.NReduce = c.nReduce
 				reply.JobType = task.jobType
-				// reduce阶段，file直接在worker里根据mr-x-x的格式得到
-				reply.Filename = task.fileName
+
+				reply.Filename = task.fileName //同上
 
 				task.startTime = time.Now()
 				// log.Printf("Coordinator: a worker timeout, assign this task %v to another worker", reply)
@@ -148,9 +148,7 @@ func (c *Coordinator) ReducePhaseInit() {
 	}
 }
 
-//
 // start a thread that listens for RPCs from worker.go
-//
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -167,7 +165,6 @@ func (c *Coordinator) server() {
 // Done
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
-//
 func (c *Coordinator) Done() bool {
 	// Your code here.
 	c.mu.Lock()
@@ -179,7 +176,6 @@ func (c *Coordinator) Done() bool {
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // NReduce is the number of reduce tasks to use.
-//
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		mu:      sync.Mutex{},

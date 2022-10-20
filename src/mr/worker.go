@@ -1,10 +1,8 @@
 package mr
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sync"
 	"time"
@@ -15,16 +13,13 @@ import "hash/fnv"
 
 // KeyValue
 // Map functions return a slice of KeyValue.
-//
 type KeyValue struct {
 	Key   string
 	Value string
 }
 
-//
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
-//
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -33,7 +28,6 @@ func ihash(key string) int {
 
 // Worker
 // main/mrworker.go calls this function.
-//
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
@@ -69,25 +63,20 @@ func reportTask(args JobFinishArgs) {
 }
 
 /*
-	worker收到master的reply后，如果拿到一份mapJob，打开reply里指定了文件名的文件,
-	读取文件内容，调用mapf函数处理文件内容得到形如
-	add 1
-	apple 2
-	bad 2
-	这样的键值对数组（[]KeyValue），再将其中的键值对按哈希值写入不同的中间文件mr-x-x,前者为mapId, 由reply指定，
-	后者由ihash(key) % NReduce得出, NReduce由master设置为固定大小，本实验设置为输入文件数量
+worker收到master的reply后，如果拿到一份mapJob，打开reply里指定了文件名的文件,
+读取文件内容，调用mapf函数处理文件内容得到形如
+add 1
+apple 2
+bad 2
+这样的键值对数组（[]KeyValue），再将其中的键值对按哈希值写入不同的中间文件mr-x-x,前者为mapId, 由reply指定，
+后者由ihash(key) % NReduce得出, NReduce由master设置为固定大小，本实验设置为输入文件数量
 */
 func doMapJob(reply *HeartbeatReply, mapf func(string, string) []KeyValue) {
 	fileName := reply.Filename
-	file, err := os.Open(fileName)
-	if err != nil {
-		log.Fatalf("cannot open %v", fileName)
-	}
-	content, err := ioutil.ReadAll(file)
+	content, err := os.ReadFile(fileName)
 	if err != nil {
 		log.Fatalf("cannot read %v", fileName)
 	}
-	file.Close()
 	kva := mapf(fileName, string(content))
 	intermediates := make([][]KeyValue, reply.NReduce)
 	for _, kv := range kva {
@@ -100,15 +89,21 @@ func doMapJob(reply *HeartbeatReply, mapf func(string, string) []KeyValue) {
 		go func(index int, intermediate []KeyValue) {
 			defer wg.Done()
 			intermediateFilePath := generateMapResultFileName(reply.Id, index)
-			var buf bytes.Buffer
-			enc := json.NewEncoder(&buf)
+			tmpFile, err := os.CreateTemp(".", intermediateFilePath)
+			if err != nil {
+				log.Fatalf("cannot create tmp file %v", intermediateFilePath)
+			}
+			enc := json.NewEncoder(tmpFile)
 			for _, kv := range intermediate {
 				err := enc.Encode(&kv)
 				if err != nil {
 					log.Fatalf("cannot encode json %v", kv.Key)
 				}
 			}
-			atomicWriteFile(intermediateFilePath, &buf)
+			if err := os.Rename(tmpFile.Name(), intermediateFilePath); err != nil {
+				fmt.Errorf("cannot replace %q with tempfile %q: %v",
+					intermediateFilePath, tmpFile.Name(), err)
+			}
 		}(index, intermediate)
 	}
 	wg.Wait()
@@ -135,24 +130,29 @@ func doReduceJob(reply *HeartbeatReply, reducef func(string, []string) string) {
 		file.Close()
 	}
 	results := make(map[string][]string)
-	// Maybe we need merge sort for larger data
 	for _, kv := range kva {
 		results[kv.Key] = append(results[kv.Key], kv.Value)
 	}
-	var buf bytes.Buffer
+
+	reduceFileName := generateReduceResultFileName(reply.Id)
+	tmpFile, err := os.CreateTemp(".", reduceFileName)
+	if err != nil {
+		log.Fatalf("cannot create tmp file %v", reduceFileName)
+	}
 	for key, values := range results {
 		output := reducef(key, values)
-		fmt.Fprintf(&buf, "%v %v\n", key, output)
+		fmt.Fprintf(tmpFile, "%v %v\n", key, output)
 	}
-	atomicWriteFile(generateReduceResultFileName(reply.Id), &buf)
+	if err := os.Rename(tmpFile.Name(), reduceFileName); err != nil {
+		fmt.Errorf("cannot replace %q with tempfile %q: %v",
+			reduceFileName, tmpFile.Name(), err)
+	}
 	reportTask(JobFinishArgs{reply.Id, ReducePhase})
 }
 
-//
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.
 // returns false if something goes wrong.
-//
 func call(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
