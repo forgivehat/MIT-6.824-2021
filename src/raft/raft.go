@@ -117,12 +117,11 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&logs) != nil || d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil {
 		DPrintf("cannot read persist data")
 	} else {
-		rf.logs = make([]Entry, len(logs))
-		copy(rf.logs, logs)
+		rf.logs = logs
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.lastApplied = rf.getLastLog().Index
-		rf.commitIndex = rf.getLastLog().Index
+		rf.lastApplied = rf.logs[0].Index
+		rf.commitIndex = rf.logs[0].Index
 	}
 }
 
@@ -203,10 +202,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// 一个Term只能给一个peer投票
-	// 收到一个更高任期的RequestVoteArgs RPC，变为Follower，采用这个新任期，清空votedFor，从而重新获得投票权
+	// 收到一个更高任期的RequestVoteArgs RPC，变为Follower, 采用这个新任期，清空votedFor, 从而重新获得投票权
+	// 注意: 如果你当前不是follower, 需要重置选举计时器; 如果是, 不要重置选举计时器!
+	// 因为它可能被其他候选者无限打断, 候选者总是在任期上占优！
 	if args.Term > rf.currentTerm {
+		state := rf.state
 		rf.ChangeState(Follower)
-		rf.reInitFollowTimer()
+		if state != Follower {
+			rf.electionTimer.Reset(RandomElectionTimeout())
+		}
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
@@ -422,8 +426,8 @@ func (rf *Raft) advanceLeaderCommit() {
 	n := len(rf.matchIndex)
 	tmp := make([]int, n)
 	copy(tmp, rf.matchIndex)
-	sort.Ints(tmp)
-	newCommitIndex := tmp[n-(n/2+1)]
+	sort.Sort(sort.Reverse(sort.IntSlice(tmp)))
+	newCommitIndex := tmp[n/2]
 
 	if newCommitIndex > rf.commitIndex {
 		// leader只能提交当前任期下的日志
