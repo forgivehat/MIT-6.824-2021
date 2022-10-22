@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"sort"
 	//	"bytes"
 	"sync"
@@ -92,13 +94,13 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.logs)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -107,18 +109,21 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var logs []Entry
+	var currentTerm int
+	var votedFor int
+	if d.Decode(&logs) != nil || d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil {
+		DPrintf("cannot read persist data")
+	} else {
+		rf.logs = make([]Entry, len(logs))
+		copy(rf.logs, logs)
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.lastApplied = rf.getLastLog().Index
+		rf.commitIndex = rf.getLastLog().Index
+	}
 }
 
 // CondInstallSnapshot
@@ -146,6 +151,7 @@ func (rf *Raft) startElection() {
 	DPrintf("[Node %v] starts election with RequestVoteArgs: %v", rf.me, args)
 	rf.votedFor = rf.me
 	rf.voteCnt = 1
+	rf.persist()
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -176,6 +182,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	// defer print，如果参数是值，如rf.state,调用这条语句那一刻就固定了，不会改变
 	// 如果参数是指针，如reply, 值会变化
 	defer DPrintf("[Node %v]'s state is {state %v,term %v,commitIndex %v,lastApplied %v,"+
@@ -219,16 +226,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // 候选者处理投票者的reply
 func (rf *Raft) handleRequestVoteReply(peer int, args *RequestVoteArgs, reply *RequestVoteReply) {
-	DPrintf("[Node %v] receives RequestVoteReply %v from {Node %v} after sending RequestVoteArgs %v in term %v", rf.me, args, peer, reply, rf.currentTerm)
+	DPrintf("[Node %v] receives RequestVoteReply %v from [Node %v] after sending RequestVoteArgs %v in term %v", rf.me, args, peer, reply, rf.currentTerm)
 	//一旦这个节点不再是candidate或者term增加了，后续传来的投票就过期了，丢弃即可
 	if rf.state == Candidate && rf.currentTerm == args.Term {
 		if reply.Term > rf.currentTerm {
-			DPrintf("[Node %v] finds a new leader {Node %v} with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
+			DPrintf("[Node %v] finds a new leader [Node %v] with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
 			rf.ChangeState(Follower)
 			rf.reInitFollowTimer()
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
 			rf.voteCnt = 0
+			rf.persist()
 			return
 		}
 		if reply.VoteGranted {
@@ -334,8 +342,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//	rf.logs[preLogIndex - rf.getFirstLog().Index].Term != term说明存在日志冲突
 	lastLogIndex := rf.getLastLog().Index
 	firstLogIndex := rf.getFirstLog().Index
-	if args.PreLogIndex > lastLogIndex ||
-		rf.logs[args.PreLogIndex-firstLogIndex].Term != args.PrevLogTerm {
+	if args.PreLogIndex > lastLogIndex || rf.logs[args.PreLogIndex-firstLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		if args.PreLogIndex > lastLogIndex {
@@ -366,11 +373,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// 确保当前仍是Leader状态并且Term没有改变的情况下才处理reply RPC
 	if rf.state == Leader && rf.currentTerm == args.Term {
+		rf.persist()
 		if reply.Term > rf.currentTerm {
 			rf.ChangeState(Follower)
 			rf.reInitFollowTimer()
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
+			rf.persist()
 			return
 		}
 		if reply.Success {
@@ -379,7 +388,7 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 			rf.advanceLeaderCommit()
 		} else {
 			rf.nextIndex[peer] = reply.ConflictIndex
-			if reply.ConflictTerm != -1 {
+			if reply.ConflictTerm != -1 { // reply.ConflictTerm等于-1时表示Follower缺少日志
 				firstLogIndex := rf.getFirstLog().Index
 				// 快速定位到冲突任期里leader拥有的最后一条entry
 				for i := args.PreLogIndex; i >= firstLogIndex; i-- {
@@ -392,8 +401,8 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 		}
 	}
 	DPrintf("[Node %v]'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} "+
-		"after handling AppendEntriesReply %v for AppendEntriesArgs %v",
-		rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), reply, args)
+		"after handling AppendEntriesReply %v from [Node %v] for AppendEntriesArgs %v",
+		rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), reply, peer, args)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -402,10 +411,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) advanceFollowerCommit(leaderCommit int) {
-	newCommitIndex := Min(leaderCommit, rf.getLastLog().Index)
-	if newCommitIndex > rf.commitIndex {
-		DPrintf("[Node %d] advance commitIndex from %d to %d with leaderCommit %d in term %d", rf.me, rf.commitIndex, newCommitIndex, leaderCommit, rf.currentTerm)
-		rf.commitIndex = newCommitIndex
+	if leaderCommit > rf.commitIndex {
+		rf.commitIndex = Min(leaderCommit, rf.getLastLog().Index)
 		rf.applyCond.Signal()
 	}
 }
@@ -419,13 +426,15 @@ func (rf *Raft) advanceLeaderCommit() {
 	newCommitIndex := tmp[n-(n/2+1)]
 
 	if newCommitIndex > rf.commitIndex {
-		// only advance commitIndex for current term's log
+		// leader只能提交当前任期下的日志
 		if newCommitIndex <= rf.getLastLog().Index && rf.currentTerm == rf.logs[newCommitIndex-rf.getFirstLog().Index].Term {
-			DPrintf("{Node %d} advance commitIndex from %d to %d with matchIndex %v in term %d", rf.me, rf.commitIndex, newCommitIndex, rf.matchIndex, rf.currentTerm)
+			DPrintf("[Node %d] advance commitIndex from %d to %d with matchIndex %v in term %d",
+				rf.me, rf.commitIndex, newCommitIndex, rf.matchIndex, rf.currentTerm)
 			rf.commitIndex = newCommitIndex
 			rf.applyCond.Signal()
 		} else {
-			DPrintf("{Node %d} can not advance commitIndex from %d because the term of newCommitIndex %d is not equal to currentTerm %d", rf.me, rf.commitIndex, newCommitIndex, rf.currentTerm)
+			DPrintf("[Node %d] can not advance commitIndex from %d because the term of newCommitIndex %d is not equal to currentTerm %d",
+				rf.me, rf.commitIndex, newCommitIndex, rf.currentTerm)
 		}
 	}
 
@@ -497,6 +506,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.logs = append(rf.logs, newLog)
 		rf.matchIndex[rf.me] = newLog.Index
 		rf.nextIndex[rf.me] = newLog.Index + 1
+		rf.persist()
 		DPrintf("[Node %v] receives a new command[%v] to replicate in term %v", rf.me, newLog, rf.currentTerm)
 		rf.BroadcastHeartbeat(false)
 		return newLog.Index, newLog.Term, true
@@ -545,7 +555,7 @@ func (rf *Raft) applier() {
 			rf.applyCh <- applyMsg
 		}
 		rf.mu.Lock()
-		rf.lastApplied = commitIndex
+		rf.lastApplied = Max(rf.lastApplied, commitIndex)
 		rf.mu.Unlock()
 	}
 }
@@ -576,6 +586,7 @@ func (rf *Raft) ticker() {
 			rf.startElection()
 			// startElection异步发起投票后返回，重置选举超时时间
 			rf.electionTimer.Reset(RandomElectionTimeout())
+
 			rf.mu.Unlock()
 		}
 	}
@@ -584,8 +595,8 @@ func (rf *Raft) ticker() {
 func (rf *Raft) replicator(peer int) {
 	rf.replicatorCond[peer].L.Lock()
 	defer rf.replicatorCond[peer].L.Unlock()
-	for rf.killed() == false {
-		for rf.needReplicating(peer) == false {
+	for !rf.killed() {
+		for !rf.needReplicating(peer) {
 			rf.replicatorCond[peer].Wait()
 		}
 		rf.doReplicate(peer)
