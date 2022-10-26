@@ -30,18 +30,6 @@ import (
 	"6.824/labrpc"
 )
 
-// ApplyMsg
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log Entry.
-//
-// in part 2D you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh, but set CommandValid to false for these
-// other uses.
-//
-
 // Raft
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -74,7 +62,6 @@ type Raft struct {
 	heartbeatTimer *time.Timer
 }
 
-// GetState
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -94,13 +81,17 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
 	// Your code here (2C).
+	rf.persister.SaveRaftState(rf.encodeState())
+}
+
+func (rf *Raft) encodeState() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.logs)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	return data
 }
 
 // restore previously persisted state.
@@ -125,24 +116,114 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-// CondInstallSnapshot
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("")
+	if lastIncludedIndex <= rf.commitIndex {
+		return false
+	}
+	if lastIncludedIndex > rf.getLastLog().Index {
+		rf.logs = make([]Entry, 1)
+	} else {
+		tmp := make([]Entry, len(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:]))
+		copy(tmp, rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.logs = tmp
+		rf.logs[0].Command = nil
+	}
+	//
+	rf.logs[0].Term = lastIncludedTerm
+	rf.logs[0].Index = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
+	rf.commitIndex = lastIncludedIndex
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+	DPrintf("[Node %v]'s state is {state %v,term %v,commitIndex %v,lastApplied %v,firstLog %v,lastLog %v} after accepting the snapshot which lastIncludedTerm is %v, lastIncludedIndex is %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
 
 	return true
 }
 
-// Snapshot
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	snapshotIndex := rf.getFirstLog().Index
+	if snapshotIndex >= index {
+		DPrintf("[Node %v] rejects snapshotting with snapshotIndex %v as current snapshotIndex is %v in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
+		return
+	}
+	newLogLen := len(rf.logs[index-rf.getFirstLog().Index:])
+	tmp := make([]Entry, newLogLen)
+	copy(tmp, rf.logs[index-rf.getFirstLog().Index:])
+	rf.logs = tmp
+	rf.logs[0].Command = nil
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+}
 
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer DPrintf("[Node %v]'s state is ", rf.me)
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+	}
+	rf.ChangeState(Follower)
+	rf.electionTimer.Reset(RandomElectionTimeout())
+
+	if rf.commitIndex >= args.LastIncludedIndex {
+		return
+	}
+
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  args.LastIncludedTerm,
+			SnapshotIndex: args.LastIncludedIndex,
+		}
+	}()
+}
+
+func (rf *Raft) genInstallSnapshotArgs() *InstallSnapshotArgs {
+	return &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.getFirstLog().Index,
+		LastIncludedTerm:  rf.getFirstLog().Term,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+}
+
+func (rf *Raft) handleInstallSnapshotReply(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	if rf.state == Leader && rf.currentTerm == args.Term {
+		if reply.Term > rf.currentTerm {
+			rf.ChangeState(Follower)
+			rf.reInitFollowTimer()
+			rf.votedFor = -1
+			rf.currentTerm = reply.Term
+			rf.persist()
+		} else {
+			rf.matchIndex[peer] = args.LastIncludedIndex
+			rf.nextIndex[peer] = args.LastIncludedIndex + 1
+		}
+	}
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
 }
 
 func (rf *Raft) startElection() {
@@ -215,7 +296,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 	}
 
-	if !rf.isLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
+	if args.LastLogTerm < rf.getLastLog().Term || (args.LastLogTerm == rf.getLastLog().Term && args.LastLogIndex < rf.getLastLog().Index) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -236,7 +317,7 @@ func (rf *Raft) handleRequestVoteReply(peer int, args *RequestVoteArgs, reply *R
 		if reply.Term > rf.currentTerm {
 			DPrintf("[Node %v] finds a new leader [Node %v] with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
 			rf.ChangeState(Follower)
-			rf.reInitFollowTimer()
+			rf.electionTimer.Reset(RandomElectionTimeout())
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
 			rf.voteCnt = 0
@@ -294,6 +375,14 @@ func (rf *Raft) doReplicate(peer int) {
 			rf.mu.Unlock()
 		}
 	} else { // need snapshot
+		args := rf.genInstallSnapshotArgs()
+		rf.mu.RUnlock()
+		reply := new(InstallSnapshotReply)
+		if rf.sendInstallSnapshot(peer, args, reply) {
+			rf.mu.Lock()
+			rf.handleInstallSnapshotReply(peer, args, reply)
+			rf.mu.Unlock()
+		}
 	}
 }
 
@@ -369,7 +458,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 	}
-	rf.advanceFollowerCommit(args.LeaderCommit)
+	rf.followerCommit(args.LeaderCommit)
 	reply.Success = true
 	reply.Term = rf.currentTerm
 }
@@ -389,7 +478,7 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 		if reply.Success {
 			rf.matchIndex[peer] = args.PreLogIndex + len(args.Entries)
 			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
-			rf.advanceLeaderCommit()
+			rf.leaderCommit()
 		} else {
 			rf.nextIndex[peer] = reply.ConflictIndex
 			if reply.ConflictTerm != -1 { // reply.ConflictTerm等于-1时表示Follower缺少日志
@@ -414,14 +503,14 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) advanceFollowerCommit(leaderCommit int) {
+func (rf *Raft) followerCommit(leaderCommit int) {
 	if leaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(leaderCommit, rf.getLastLog().Index)
 		rf.applyCond.Signal()
 	}
 }
 
-func (rf *Raft) advanceLeaderCommit() {
+func (rf *Raft) leaderCommit() {
 	//根据matchIndex，判断出那些log已经被大多数peer记录了
 	n := len(rf.matchIndex)
 	tmp := make([]int, n)
@@ -452,19 +541,6 @@ func (rf *Raft) getLastLog() Entry {
 	return rf.logs[len(rf.logs)-1]
 }
 
-func (rf *Raft) isLogUpToDate(term, index int) bool {
-	lastLog := rf.getLastLog()
-	// 比本节点最后一条log的term还要小，属于是过期产品了
-	if term < lastLog.Term {
-		return false
-	}
-	// term是一样的，但是本节点拥有更多这个term下的log
-	if term == lastLog.Term && index < lastLog.Index {
-		return false
-	}
-	return true
-}
-
 func (rf *Raft) ChangeState(state State) {
 	if rf.state == state {
 		return
@@ -488,7 +564,6 @@ func (rf *Raft) reInitLeaderState() {
 	rf.electionTimer.Stop()
 }
 
-// Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -518,7 +593,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return -1, -1, false
 }
 
-// Kill
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -613,7 +687,6 @@ func (rf *Raft) needReplicating(peer int) bool {
 	return rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
 }
 
-// Make
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays

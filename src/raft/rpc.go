@@ -2,12 +2,10 @@ package raft
 
 import "fmt"
 
-// RequestVoteArgs
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
-//
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	// Your Data here (2A, 2B).
 	Term         int
 	CandidateId  int
 	LastLogIndex int
@@ -18,12 +16,10 @@ func (args RequestVoteArgs) String() string {
 	return fmt.Sprintf("{Term:%v,CandidateId:%v,LastLogIndex:%v,LastLogTerm:%v}", args.Term, args.CandidateId, args.LastLogIndex, args.LastLogTerm)
 }
 
-// RequestVoteReply
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
-//
 type RequestVoteReply struct {
-	// Your data here (2A).
+	// Your Data here (2A).
 	Term        int
 	VoteGranted bool
 }
@@ -54,4 +50,24 @@ type AppendEntriesReply struct {
 
 func (response AppendEntriesReply) String() string {
 	return fmt.Sprintf("{Term:%v,Success:%v}", response.Term, response.Success)
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+func (args InstallSnapshotArgs) String() string {
+	return fmt.Sprintf("{Term:%v,LeaderId:%v,LastIncludedIndex:%v,LastIncludedTerm:%v}", args.Term, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (reply InstallSnapshotReply) String() string {
+	return fmt.Sprintf("{Term:%v}", reply.Term)
 }
