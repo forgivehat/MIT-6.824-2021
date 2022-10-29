@@ -32,20 +32,21 @@ type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
 	PreLogIndex  int
-	PrevLogTerm  int
+	PreLogTerm   int
 	Entries      []Entry
 	LeaderCommit int
 }
 
 func (args AppendEntriesArgs) String() string {
-	return fmt.Sprintf("{Term:%v,LeaderId:%v,PreLogIndex:%v,PrevLogTerm:%v,LeaderCommit:%v,Entries:%v}", args.Term, args.LeaderId, args.PreLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Entries)
+	return fmt.Sprintf("{Term:%v,LeaderId:%v,PreLogIndex:%v,PreLogTerm:%v,LeaderCommit:%v,Entries:%v}", args.Term, args.LeaderId, args.PreLogIndex, args.PreLogTerm, args.LeaderCommit, args.Entries)
 }
 
 type AppendEntriesReply struct {
-	Term          int
-	Success       bool
-	ConflictTerm  int
-	ConflictIndex int
+	Term    int
+	Success bool
+	XTerm   int
+	XIndex  int
+	XLen    int
 }
 
 func (response AppendEntriesReply) String() string {

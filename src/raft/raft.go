@@ -123,7 +123,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("")
 	if lastIncludedIndex <= rf.commitIndex {
 		return false
 	}
@@ -135,7 +134,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 		rf.logs = tmp
 		rf.logs[0].Command = nil
 	}
-	//
 	rf.logs[0].Term = lastIncludedTerm
 	rf.logs[0].Index = lastIncludedIndex
 	rf.lastApplied = lastIncludedIndex
@@ -179,7 +177,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
-	rf.ChangeState(Follower)
+	rf.changeState(Follower)
 	rf.electionTimer.Reset(RandomElectionTimeout())
 
 	if rf.commitIndex >= args.LastIncludedIndex {
@@ -209,7 +207,7 @@ func (rf *Raft) genInstallSnapshotArgs() *InstallSnapshotArgs {
 func (rf *Raft) handleInstallSnapshotReply(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	if rf.state == Leader && rf.currentTerm == args.Term {
 		if reply.Term > rf.currentTerm {
-			rf.ChangeState(Follower)
+			rf.changeState(Follower)
 			rf.reInitFollowTimer()
 			rf.votedFor = -1
 			rf.currentTerm = reply.Term
@@ -288,7 +286,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 因为它可能被其他候选者无限打断, 候选者总是在任期上占优！
 	if args.Term > rf.currentTerm {
 		state := rf.state
-		rf.ChangeState(Follower)
+		rf.changeState(Follower)
 		if state != Follower {
 			rf.electionTimer.Reset(RandomElectionTimeout())
 		}
@@ -316,7 +314,7 @@ func (rf *Raft) handleRequestVoteReply(peer int, args *RequestVoteArgs, reply *R
 	if rf.state == Candidate && rf.currentTerm == args.Term {
 		if reply.Term > rf.currentTerm {
 			DPrintf("[Node %v] finds a new leader [Node %v] with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
-			rf.ChangeState(Follower)
+			rf.changeState(Follower)
 			rf.electionTimer.Reset(RandomElectionTimeout())
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
@@ -328,11 +326,11 @@ func (rf *Raft) handleRequestVoteReply(peer int, args *RequestVoteArgs, reply *R
 			rf.voteCnt += 1
 			if rf.voteCnt > len(rf.peers)/2 {
 				DPrintf("[Node %v] receives majority votes in term %v", rf.me, rf.currentTerm)
-				rf.ChangeState(Leader)
+				rf.changeState(Leader)
 				rf.reInitLeaderState()
 				rf.voteCnt = 0 // 不知道有没有必要清0
 				// 当选leader后立即发送心跳信号
-				rf.BroadcastHeartbeat(true)
+				rf.broadcastHeartbeat(true)
 			}
 		}
 	}
@@ -343,7 +341,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) BroadcastHeartbeat(isHeartbeat bool) {
+func (rf *Raft) broadcastHeartbeat(isHeartbeat bool) {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -395,7 +393,7 @@ func (rf *Raft) genAppendEntriesArgs(prevLogIndex int) *AppendEntriesArgs {
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PreLogIndex:  prevLogIndex,
-		PrevLogTerm:  rf.logs[prevLogIndex-firstIndex].Term,
+		PreLogTerm:   rf.logs[prevLogIndex-firstIndex].Term,
 		Entries:      entries,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -421,7 +419,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
-	rf.ChangeState(Follower)
+	rf.changeState(Follower)
 	rf.reInitFollowTimer()
 
 	if args.PreLogIndex < rf.getFirstLog().Index {
@@ -431,23 +429,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	//	preLogIndex > rf.getLastLog().Index说明当前节点缺少日志
-	//	rf.logs[preLogIndex - rf.getFirstLog().Index].Term != term说明存在日志冲突
 	lastLogIndex := rf.getLastLog().Index
 	firstLogIndex := rf.getFirstLog().Index
-	if args.PreLogIndex > lastLogIndex || rf.logs[args.PreLogIndex-firstLogIndex].Term != args.PrevLogTerm {
-		reply.Term = rf.currentTerm
+	//	preLogIndex > rf.getLastLog().Index说明当前节点缺少日志
+	//	rf.logs[preLogIndex - rf.getFirstLog().Index].Term != term说明存在日志冲突
+	if args.PreLogIndex > lastLogIndex ||
+		rf.logs[args.PreLogIndex-firstLogIndex].Term != args.PreLogTerm {
 		reply.Success = false
+		reply.Term = rf.currentTerm
+		// 当前Follower日志太短，以至于在冲突的位置没有Log条目，Leader应该回退到Follower最后一条Log条目的下一条
 		if args.PreLogIndex > lastLogIndex {
-			reply.ConflictIndex = lastLogIndex + 1
-			reply.ConflictTerm = -1
+			reply.XTerm = -1
+			reply.XLen = args.PreLogIndex - rf.getLastLog().Index
 		} else {
-			reply.ConflictTerm = rf.logs[args.PreLogIndex-firstLogIndex].Term
-			i := args.PreLogIndex - 1
-			for i >= firstLogIndex && rf.logs[i-firstLogIndex].Term == reply.ConflictTerm { // 每次只判断一个任期内的日志
-				i--
+			reply.XTerm = rf.logs[args.PreLogIndex-firstLogIndex].Term
+			i := 0
+			for i = args.PreLogIndex; i > firstLogIndex; i-- {
+				if rf.logs[i-firstLogIndex].Term != reply.XTerm {
+					break
+				}
 			}
-			reply.ConflictIndex = i
+			reply.XIndex = i + 1
 		}
 		return
 	}
@@ -455,7 +457,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range args.Entries {
 		if entry.Index > lastLogIndex || rf.logs[entry.Index-firstLogIndex].Term != entry.Term {
 			rf.logs = append(rf.logs[:entry.Index-firstLogIndex], args.Entries[i:]...)
-			break
 		}
 	}
 	rf.followerCommit(args.LeaderCommit)
@@ -468,7 +469,7 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 	if rf.state == Leader && rf.currentTerm == args.Term {
 		rf.persist()
 		if reply.Term > rf.currentTerm {
-			rf.ChangeState(Follower)
+			rf.changeState(Follower)
 			rf.reInitFollowTimer()
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
@@ -480,15 +481,20 @@ func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, repl
 			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
 			rf.leaderCommit()
 		} else {
-			rf.nextIndex[peer] = reply.ConflictIndex
-			if reply.ConflictTerm != -1 { // reply.ConflictTerm等于-1时表示Follower缺少日志
+			if reply.XTerm == -1 { // follower最后一条日志比preLogIndex还小
+				rf.nextIndex[peer] -= reply.XLen
+			} else {
 				firstLogIndex := rf.getFirstLog().Index
-				// 快速定位到冲突任期里leader拥有的最后一条entry
+				find := false
 				for i := args.PreLogIndex; i >= firstLogIndex; i-- {
-					if rf.logs[i-firstLogIndex].Term == reply.ConflictTerm {
-						rf.nextIndex[peer] = i + 1
+					if rf.logs[i-firstLogIndex].Term == reply.XTerm {
+						find = true
+						rf.nextIndex[peer] = reply.XIndex + 1
 						break
 					}
+				}
+				if !find {
+					rf.nextIndex[peer] = reply.XIndex
 				}
 			}
 		}
@@ -541,7 +547,7 @@ func (rf *Raft) getLastLog() Entry {
 	return rf.logs[len(rf.logs)-1]
 }
 
-func (rf *Raft) ChangeState(state State) {
+func (rf *Raft) changeState(state State) {
 	if rf.state == state {
 		return
 	}
@@ -587,7 +593,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.nextIndex[rf.me] = newLog.Index + 1
 		rf.persist()
 		DPrintf("[Node %v] receives a new command[%v] to replicate in term %v", rf.me, newLog, rf.currentTerm)
-		rf.BroadcastHeartbeat(false)
+		rf.broadcastHeartbeat(false)
 		return newLog.Index, newLog.Term, true
 	}
 	return -1, -1, false
@@ -651,7 +657,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			// 只有leader才能发送心跳
 			if rf.state == Leader {
-				rf.BroadcastHeartbeat(true)
+				rf.broadcastHeartbeat(true)
 				// 发送心跳后重置心跳计时器
 				rf.heartbeatTimer.Reset(FixedHeartbeatTimeout())
 			}
@@ -659,7 +665,7 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
 			DPrintf("[Node %d] election elapsed, start election", rf.me)
-			rf.ChangeState(Candidate)
+			rf.changeState(Candidate)
 			rf.currentTerm++
 			rf.startElection()
 			// startElection异步发起投票后返回，重置选举超时时间
