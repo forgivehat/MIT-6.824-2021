@@ -467,7 +467,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) handleAppendEntriesReply(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// 确保当前仍是Leader状态并且Term没有改变的情况下才处理reply RPC
 	if rf.state == Leader && rf.currentTerm == args.Term {
-		rf.persist()
 		if reply.Term > rf.currentTerm {
 			rf.changeState(Follower)
 			rf.reInitFollowTimer()
