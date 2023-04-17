@@ -39,12 +39,6 @@ func (ck *Clerk) Append(key string, value string) {
 	ck.Command(&CommandArgs{Key: key, Value: value, Op: OpAppend})
 }
 
-// you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.Command", &request, &response)
-//
-// the types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Command(request *CommandArgs) string {
 	request.ClientId, request.CommandId = ck.clientId, ck.commandId
 	for {
