@@ -292,7 +292,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		state := rf.state
 		rf.changeState(Follower)
 		if state != Follower {
-			rf.electionTimer.Reset(RandomElectionTimeout())
+			rf.reInitFollowTimer()
 		}
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
@@ -305,7 +305,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	rf.votedFor = args.CandidateId
-	rf.electionTimer.Reset(RandomElectionTimeout())
+	rf.reInitFollowTimer()
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
 
@@ -319,7 +319,7 @@ func (rf *Raft) handleRequestVoteReply(peer int, args *RequestVoteArgs, reply *R
 		if reply.Term > rf.currentTerm {
 			DPrintf("[Node %v] finds a new leader [Node %v] with term %v and steps down in term %v", rf.me, peer, reply.Term, rf.currentTerm)
 			rf.changeState(Follower)
-			rf.electionTimer.Reset(RandomElectionTimeout())
+			rf.reInitFollowTimer()
 			rf.currentTerm = reply.Term
 			rf.votedFor = -1
 			rf.voteCnt = 0
@@ -332,7 +332,7 @@ func (rf *Raft) handleRequestVoteReply(peer int, args *RequestVoteArgs, reply *R
 				DPrintf("[Node %v] receives majority votes in term %v", rf.me, rf.currentTerm)
 				rf.changeState(Leader)
 				rf.reInitLeaderState()
-				rf.voteCnt = 0 // 不知道有没有必要清0
+				rf.voteCnt = 0
 				// 当选leader后立即发送心跳信号
 				rf.broadcastHeartbeat(true)
 			}
