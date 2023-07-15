@@ -1,5 +1,10 @@
 package shardctrler
 
+import (
+	"fmt"
+	"log"
+)
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -17,6 +22,15 @@ package shardctrler
 // You will need to add fields to the RPC argument structs.
 //
 
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 // The number of shards.
 const NShards = 10
 
@@ -28,46 +42,98 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (cf Config) String() string {
+	return fmt.Sprintf("{Num:%v,Shards:%v,Groups:%v}", cf.Num, cf.Shards, cf.Groups)
+}
+
+type Session struct {
+	LastAppliedCommandId int64
+	LastResponse         *OperationResponse
+}
+
+type Command struct {
+	*CommandRequest
+}
+
+type Err uint8
+
 const (
-	OK = "OK"
+	OK Err = iota
+	ErrWrongLeader
+	ErrTimeout
 )
 
-type Err string
+func (err Err) String() string {
+	switch err {
+	case OK:
+		return "OK"
+	case ErrWrongLeader:
+		return "ErrWrongLeader"
+	case ErrTimeout:
+		return "ErrTimeout"
+	}
+	panic(fmt.Sprintf("unexpected Err %d", err))
+}
 
-type JoinArgs struct {
+type OperationType int
+
+const (
+	OpJoin OperationType = iota
+	OpLeave
+	OpMove
+	OpQuery
+)
+
+func (op OperationType) String() string {
+	switch op {
+	case OpJoin:
+		return "OpJoin"
+	case OpLeave:
+		return "OpLeave"
+	case OpMove:
+		return "OpMove"
+	case OpQuery:
+		return "OpQuery"
+	}
+	panic(fmt.Sprintf("unexpected OperationType %d", op))
+}
+
+type CommandRequest struct {
+	ClientId  int64
+	CommandId int64
+	Op        OperationType
+	// for join
 	Servers map[int][]string // new GID -> servers mappings
-}
-
-type JoinReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type LeaveArgs struct {
+	// for leave
 	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type MoveArgs struct {
+	// for move
 	Shard int
 	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type QueryArgs struct {
+	// for query
 	Num int // desired config number
 }
 
-type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+func (request CommandRequest) String() string {
+	switch request.Op {
+	case OpJoin:
+		return fmt.Sprintf("{Op:%v, Servers:%v, ClientId:%v, CommandId:%v}", request.Op, request.Servers, request.ClientId, request.CommandId)
+	case OpLeave:
+		return fmt.Sprintf("{Op:%v, GIDs:%v, ClientId:%v, CommandId:%v}", request.Op, request.Servers, request.ClientId, request.CommandId)
+	case OpMove:
+		return fmt.Sprintf("{Op:%v, Shard:%v,GID:%v, ClientId:%v, CommandId:%v}", request.Op, request.Shard, request.GID, request.ClientId, request.CommandId)
+	case OpQuery:
+		return fmt.Sprintf("{Op:%v, Num:%v, ClientId:%v, CommandId:%v}", request.Op, request.Num, request.ClientId, request.CommandId)
+	default:
+		panic(fmt.Sprintf("unexpected CommandOp %d", request.Op))
+	}
+}
+
+type OperationResponse struct {
+	Err Err
+	// for query
+	Config Config
+}
+
+func (response *OperationResponse) String() string {
+	return fmt.Sprintf("{Err:%v, Config:%v}", response.Err, response.Config)
 }
