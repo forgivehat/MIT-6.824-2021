@@ -550,6 +550,12 @@ func (rf *Raft) getLastLog() Entry {
 	return rf.logs[len(rf.logs)-1]
 }
 
+func (rf *Raft) HasLogInCurrentTerm() bool {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.currentTerm == rf.getLastLog().Term
+}
+
 func (rf *Raft) changeState(state State) {
 	if rf.state == state {
 		return
